@@ -8,6 +8,9 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <pthread.h>
+#include <sys/time.h>
+#include <dirent.h>
+#include <time.h>
 
 #define MAXLINE  8192  /* max text line length */
 #define MAXBUF   8192  /* max I/O buffer size */
@@ -27,9 +30,10 @@ struct HttpRequest {
 struct HttpResponse {
     char http_version[10];
     char status_code[4];
-    char content_type[10];
+    char content_type[20];
     char content_length[10];
     char *content;
+    long length;
 };
 
 int main(int argc, char **argv) 
@@ -40,19 +44,19 @@ int main(int argc, char **argv)
     
 
     if (argc != 2) {
-	fprintf(stderr, "usage: %s <port>\n", argv[0]);
-	exit(0);
+        fprintf(stderr, "usage: %s <port>\n", argv[0]);
+        exit(0);
     }
     port = atoi(argv[1]);
 
     listenfd = open_listenfd(port);
     while (1) {
-        connfdp = malloc(sizeof(int));
+        connfdp = malloc(4 * sizeof(int));
         *connfdp = accept(listenfd, (struct sockaddr*)&clientaddr, &clientlen);
         if (*connfdp < 1) {
             continue;
         }
-        printf("connection made");
+        printf("----------------connection made---------------- \n");
         pthread_create(&tid, NULL, thread, connfdp);
     }
 }
@@ -64,6 +68,7 @@ void * thread(void * vargp)
     pthread_detach(pthread_self()); 
     free(vargp);
     echo(connfd);
+    printf("-----------closing connection----------------- \n");
     close(connfd);
     return NULL;
 }
@@ -71,11 +76,11 @@ void * thread(void * vargp)
 struct HttpRequest getHttpAttributes(char *buf) {
     int i = 0, j = 0;
     char httpMethod[7], httpVersion[10], resource[100], host[100], connection_state[50];
-    memset(connection_state, 0, 50);
-    memset(httpMethod, 0, 7);
-    memset(httpVersion, 0, 10);
-    memset(resource, 0, 100);
-    memset(host, 0, 100);
+    // memset(connection_state, 0, 50);
+    // memset(httpMethod, 0, 7);
+    // memset(httpVersion, 0, 10);
+    // memset(resource, 0, 100);
+    // memset(host, 0, 100);
     char space = ' ';
     struct HttpRequest request;
     while (!(buf[i] == ' ')) {
@@ -107,10 +112,11 @@ struct HttpRequest getHttpAttributes(char *buf) {
         strcpy(request.host, host);
     }
     j = 0;
-    while (buf[i] != 'C' || buf[i+1] != 'o' || buf[i+2] != 'n') {
+    int len = strlen(buf);
+    while (i < len && (buf[i] != 'C' || buf[i+1] != 'o' || buf[i+2] != 'n')) {
         i++;
     }
-    if ((i + 5) < strlen(buf)) {
+    if (i < len) {
         // "Connection: "
         i += 12;
         while(!(buf[i] == '\r')) {
@@ -129,14 +135,14 @@ struct HttpRequest getHttpAttributes(char *buf) {
 struct HttpResponse getResponseContents(struct HttpRequest request) {
     char *base_path = "./www";
     char *path;
-    path = malloc(100 * sizeof(char));
-    memset(path, 0, 100);
+    path = malloc(1000 * sizeof(char));
     FILE *fp;
     int file_not_found = 0;
     struct HttpResponse response;
     bzero(response.http_version, 8);
     strcpy(response.http_version, request.http_version);
     if (strcmp(request.resource, "/") == 0 || strcmp(request.resource, "/index.html") == 0 ) {
+        memset(path, 0, 1000);
         strcat(path, base_path);
         strcat(path, "/index.html");
         fp = fopen(path, "r");
@@ -144,29 +150,36 @@ struct HttpResponse getResponseContents(struct HttpRequest request) {
             file_not_found = 1;
         }
     } else {
+        memset(path, 0, 1000);
         strcat(path, base_path);
         strcat(path, request.resource);
-        fp = fopen(path, "r");
+        printf("requested file %s \n", path);
+        fp = fopen(path, "rb");
         if (fp == NULL) {
             file_not_found = 1;
         }
     }
     if (file_not_found) {
-        strcpy(response.status_code, "500");
-        char *contents = "<html><h1>File not found!</h1></html>";
+        printf("%s, file not found \n", request.resource);
+        strcpy(response.status_code, "404");
+        response.status_code[4] = '\0';
+        char *contents = "<html><head><title>404 File Not Found</title></head><body><h2>404 File Not Found</h2></body></html>";
         response.content = malloc(strlen(contents) * sizeof(char));
         strcpy(response.content, contents);
+        strcpy(response.content_type, "text/html");
         sprintf(response.content_length, "%ld", strlen(contents));
+        response.length = strlen(contents);
     } else {
         char *file_type = malloc(10 * sizeof(char));
-        int i = 0;
-        char *resource = malloc(10 * sizeof(char));
+        char *resource = malloc(1000);
+        memset(resource, 0, 1000);
         strcpy(resource, request.resource);
+        int i = strlen(resource) - 1;
         if (strlen(resource) == 1 && resource[0] == '/') {
             file_type = "html";
         } else {
             while(resource[i] != '.') {
-                i++;
+                i--;
             }
             i += 1; int j = 0;
             while(resource[i] != '\0') {
@@ -175,32 +188,63 @@ struct HttpResponse getResponseContents(struct HttpRequest request) {
             }
             file_type[j] = '\0';
         }
+        printf("requested file type %s \n", file_type);
+        memset(response.content_type, 0, 20);
         if (strcmp(file_type, "html") == 0) {
-            strcpy(response.content_type, "text/html");
+            char *content_type = "text/html";
+            strcpy(response.content_type, content_type);
         } else if (strcmp(file_type, "pdf") == 0) {
-            strcpy(response.content_type, "text/pdf");
+            char *content_type = "text/pdf";
+            strcpy(response.content_type, content_type);
         } else if (strcmp(file_type, "txt") == 0) {
-            strcpy(response.content_type, "text/plain");
+            char *content_type = "text/plain";
+            strcpy(response.content_type, content_type);
         } else if (strcmp(file_type, "gif") == 0) {
-            strcpy(response.content_type, "image/gif");
+            char *content_type = "image/gif";
+            strcpy(response.content_type, content_type);
         } else if (strcmp(file_type, "jpg") == 0) {
-            strcpy(response.content_type, "image/jpg");
+            char *content_type = "image/jpg";
+            strcpy(response.content_type, content_type);
+        } else if (strcmp(file_type, "png") == 0) {
+            char *content_type = "image/png";
+            strcpy(response.content_type, content_type);
         } else if (strcmp(file_type, "css") == 0) {
-            strcpy(response.content_type, "text/css");
-        } else {
-            strcpy(response.content_type, "unknown");
+            char *content_type = "text/css";
+            strcpy(response.content_type, content_type);
+        } else if (strcmp(file_type, "js") == 0) {
+            char *content_type = "text/javascript";
+            strcpy(response.content_type, content_type);
+        } else if (strcmp(file_type, "ico") == 0) {
+            strcpy(response.content_type, "image/x-icon");
+        } 
+        else {
+            strcpy(response.content_type, "");
         }
         fseek(fp, 0, SEEK_END);
         long fsize = ftell(fp);
         fseek(fp, 0, SEEK_SET);
         char *file = malloc(fsize + 1);
-        fread(file, fsize, 1, fp);
-        fclose(fp);
-        file[fsize] = 0;
-        response.content = malloc(fsize * sizeof(char));
-        strcpy(response.status_code, "200");
-        strcpy(response.content, file);
-        sprintf(response.content_length, "%ld", fsize);
+        if (file != NULL) {
+            fread(file, fsize, 1, fp);
+            fclose(fp);
+            file[fsize] = 0;
+            response.length = fsize;
+            response.content = malloc(fsize + 1);
+            char *status = "200";
+            // memset(response.status_code, 0, 4);
+            strcpy(response.status_code, status);
+            memcpy(response.content, file, fsize);
+            // memset(response.content_length, 0, 10);
+            sprintf(response.content_length, "%ld", fsize);
+        } else {
+            strcpy(response.status_code, "404");
+            char *contents = "<html><head><title>404 File Not Found</title></head><body><h2>404 File Not Found</h2></body></html>";
+            response.content = malloc(strlen(contents) * sizeof(char));
+            strcpy(response.content, contents);
+            strcpy(response.content_type, "text/html");
+            sprintf(response.content_length, "%ld", strlen(contents));
+            response.length = strlen(contents);
+        }
     }
     return response;
 }
@@ -210,12 +254,14 @@ struct HttpResponse postResponseContents(struct HttpRequest request) {
     if (strcmp(response.status_code, "500") == 0) {
         return response;
     }
-    char *content = malloc(strlen(response.content) * sizeof(char) + 200 * sizeof(char));
+    char *content = malloc(response.length + 200);
     strcpy(content, response.content);
-    bzero(response.content, strlen(response.content));
+    memset(response.content, 0, response.length);
     char *header = "<html><body><pre><h1>POSTDATA </h1></pre>";
-    memcpy(response.content, header, strlen(header));
-    memcpy(response.content + strlen(header), content, strlen(content));
+    response.length += strlen(header);
+    sprintf(response.content_length, "%ld", response.length);
+    strcat(response.content, header);
+    strcat(response.content, content);
     return response;
 }
 
@@ -230,22 +276,21 @@ void clear(struct HttpRequest req) {
 /*
  * echo - read and echo text lines until client closes connection
  */
-void echo(int connfd) 
+void echo(int connfd)
 {
     size_t n;
     char buf[MAXLINE]; 
-    char httpmsg[] = "HTTP/1.1 200 Document Follows\r\nContent-Type:text/html\r\nContent-Length:32\r\n\r\n<html><h1>Hello CSCI4273 Course!</h1>";
     char *response_str;
-    response_str = malloc(20000 * sizeof(char));
+    response_str = malloc(200000 * sizeof(char));
     struct HttpRequest request;
     struct HttpResponse response;
     int keepAlive = 0; int is_first = 1;
     n = read(connfd, buf, MAXLINE);
-    if (n > 0) {
-        while(keepAlive == 1 || is_first == 1) {
+    if (n > 0 && strlen(buf) > 1) {
+        while((keepAlive == 1 || is_first == 1) && strlen(buf) > 1) {
             printf("Request made on socket: %d \n", connfd);
-            clear(request);
-            memset(response_str, 0, 20000 * sizeof(char));
+            // clear(request);
+            // memset(response_str, 0, 200000 * sizeof(char));
             request = getHttpAttributes(buf);
             if (strcmp(request.connection_state, "Keep-alive") == 0 || strcmp(request.connection_state, "keep-alive") == 0) {
                 keepAlive = 1;
@@ -265,41 +310,50 @@ void echo(int connfd)
             strcat(response_str, " ");
             strcat(response_str, response.status_code);
             strcat(response_str, " ");
-            if (strcmp(response.status_code, "500") == 0) {
-                strcat(response_str, "Internal Server Error");
+            strcat(response_str, "Document Follows");
+            strcat(response_str, "\r\n");
+            strcat(response_str, "Content-Type:");
+            strcat(response_str, response.content_type);
+            strcat(response_str, "\r\n");
+            strcat(response_str, "Content-Length:");
+            strcat(response_str, response.content_length);
+            strcat(response_str, "\r\n");
+            if (strcmp(response.status_code, "500") == 0 || strcmp(response.status_code, "404") == 0 ) {
+                printf("server error \n");
+                strcat(response_str, "\r\n");
+                write(connfd, response_str, strlen(response_str));
+                write(connfd, response.content, response.length);
+                keepAlive = 0;
             } else {
-                strcat(response_str, "Document Follows");
-                strcat(response_str, "\r\n");
-                strcat(response_str, "Content-Type:");
-                strcat(response_str, response.content_type);
-                strcat(response_str, "\r\n");
-                strcat(response_str, "Content-Length:");
-                strcat(response_str, response.content_length);
-                strcat(response_str, "\r\n");
                 if (keepAlive == 1) {
-                    strcat(response_str, "Connection: Keep-alive\r\n");
-                } else {
-                    strcat(response_str, "Connection: Close\r\n");
-                }
+                    strcat(response_str, "Connection: keep-alive");
+               } else {
+                    strcat(response_str, "Connection: Close");
+               }
                 if (strcmp(request.request_method, "POST") == 0 || strcmp(request.request_method, "GET") == 0) {
                     strcat(response_str, "\r\n\r\n");
-                    strcat(response_str, response.content);
+                    write(connfd, response_str, strlen(response_str));
+                    write(connfd, response.content, response.length);
+                    // memcpy(response_str + strlen(response_str), response.content, response.length);
+                } else {            
+                    write(connfd, response_str, strlen(response_str));
                 }
             }
-            write(connfd, response_str, strlen(response_str));
+            memset(response_str, 0, strlen(response_str));
+            memset(buf, 0, MAXLINE);
             is_first = 0;
             if (keepAlive == 1) {
-                printf("waiting to read");
-                bzero(buf, strlen(buf));
+                printf("waiting to read \n");
+                // bzero(buf, strlen(buf));
                 n = read(connfd, buf, MAXLINE);
-                printf("reading request");
+                printf("reading request \n");
+                // printf("%s \n", buf);
                 if (n < 0) {
-                    printf("empty message");
+                    printf("empty message \n");
                 }
             }
         }
     }
-    
 }
 
 /* 
@@ -310,14 +364,16 @@ int open_listenfd(int port)
 {
     int listenfd, optval=1;
     struct sockaddr_in serveraddr;
+    struct timeval tv;
+    tv.tv_sec = 10;
+	tv.tv_usec = 0;
   
     /* Create a socket descriptor */
     if ((listenfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
         return -1;
-
     /* Eliminates "Address already in use" error from bind. */
-    if (setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, 
-                   (const void *)&optval , sizeof(int)) < 0)
+    if (setsockopt(listenfd, SOL_SOCKET, SO_RCVTIMEO,
+            (const char*)&tv, sizeof tv) < 0)
         return -1;
 
     /* listenfd will be an endpoint for all requests to port
@@ -334,4 +390,3 @@ int open_listenfd(int port)
         return -1;
     return listenfd;
 } /* end open_listenfd */
-
