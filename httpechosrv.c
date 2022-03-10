@@ -21,6 +21,8 @@ struct HttpRequest {
     char request_method[7];
     char http_version[10];
     char resource[100];
+    char host[100];
+    char connection_state[50];
 };
 struct HttpResponse {
     char http_version[10];
@@ -34,7 +36,8 @@ int main(int argc, char **argv)
 {
     int listenfd, *connfdp, port, clientlen=sizeof(struct sockaddr_in);
     struct sockaddr_in clientaddr;
-    pthread_t tid; 
+    pthread_t tid;
+    
 
     if (argc != 2) {
 	fprintf(stderr, "usage: %s <port>\n", argv[0]);
@@ -55,7 +58,7 @@ int main(int argc, char **argv)
 }
 
 /* thread routine */
-void * thread(void * vargp) 
+void * thread(void * vargp)
 {
     int connfd = *((int *)vargp);
     pthread_detach(pthread_self()); 
@@ -67,7 +70,12 @@ void * thread(void * vargp)
 
 struct HttpRequest getHttpAttributes(char *buf) {
     int i = 0, j = 0;
-    char httpMethod[7], httpVersion[10], resource[100];
+    char httpMethod[7], httpVersion[10], resource[100], host[100], connection_state[50];
+    memset(connection_state, 0, 50);
+    memset(httpMethod, 0, 7);
+    memset(httpVersion, 0, 10);
+    memset(resource, 0, 100);
+    memset(host, 0, 100);
     char space = ' ';
     struct HttpRequest request;
     while (!(buf[i] == ' ')) {
@@ -87,6 +95,31 @@ struct HttpRequest getHttpAttributes(char *buf) {
         i++;j++;
     }
     httpVersion[j] = '\0';
+    j = 0; i += 2;
+    if (buf[i] == 'H') {
+        // "Host: "
+        i += 6;
+        while(!(buf[i] == '\r')) {
+            host[j] = buf[i];
+            j += 1; i += 1;
+        }
+        host[j] = '\0';
+        strcpy(request.host, host);
+    }
+    j = 0;
+    while (buf[i] != 'C' || buf[i+1] != 'o' || buf[i+2] != 'n') {
+        i++;
+    }
+    if ((i + 5) < strlen(buf)) {
+        // "Connection: "
+        i += 12;
+        while(!(buf[i] == '\r')) {
+            connection_state[j] = buf[i];
+            j += 1; i += 1;
+        }
+        connection_state[j] = '\0';
+    }
+    strcpy(request.connection_state, connection_state);
     strcpy(request.http_version, httpVersion);
     strcpy(request.request_method, httpMethod);
     strcpy(request.resource, resource);
@@ -97,6 +130,7 @@ struct HttpResponse getResponseContents(struct HttpRequest request) {
     char *base_path = "./www";
     char *path;
     path = malloc(100 * sizeof(char));
+    memset(path, 0, 100);
     FILE *fp;
     int file_not_found = 0;
     struct HttpResponse response;
@@ -118,12 +152,44 @@ struct HttpResponse getResponseContents(struct HttpRequest request) {
         }
     }
     if (file_not_found) {
-        strcpy(response.status_code, "404");
+        strcpy(response.status_code, "500");
         char *contents = "<html><h1>File not found!</h1></html>";
         response.content = malloc(strlen(contents) * sizeof(char));
         strcpy(response.content, contents);
         sprintf(response.content_length, "%ld", strlen(contents));
     } else {
+        char *file_type = malloc(10 * sizeof(char));
+        int i = 0;
+        char *resource = malloc(10 * sizeof(char));
+        strcpy(resource, request.resource);
+        if (strlen(resource) == 1 && resource[0] == '/') {
+            file_type = "html";
+        } else {
+            while(resource[i] != '.') {
+                i++;
+            }
+            i += 1; int j = 0;
+            while(resource[i] != '\0') {
+                file_type[j] = resource[i];
+                i++;j++;
+            }
+            file_type[j] = '\0';
+        }
+        if (strcmp(file_type, "html") == 0) {
+            strcpy(response.content_type, "text/html");
+        } else if (strcmp(file_type, "pdf") == 0) {
+            strcpy(response.content_type, "text/pdf");
+        } else if (strcmp(file_type, "txt") == 0) {
+            strcpy(response.content_type, "text/plain");
+        } else if (strcmp(file_type, "gif") == 0) {
+            strcpy(response.content_type, "image/gif");
+        } else if (strcmp(file_type, "jpg") == 0) {
+            strcpy(response.content_type, "image/jpg");
+        } else if (strcmp(file_type, "css") == 0) {
+            strcpy(response.content_type, "text/css");
+        } else {
+            strcpy(response.content_type, "unknown");
+        }
         fseek(fp, 0, SEEK_END);
         long fsize = ftell(fp);
         fseek(fp, 0, SEEK_SET);
@@ -139,6 +205,28 @@ struct HttpResponse getResponseContents(struct HttpRequest request) {
     return response;
 }
 
+struct HttpResponse postResponseContents(struct HttpRequest request) {
+    struct HttpResponse response = getResponseContents(request);
+    if (strcmp(response.status_code, "500") == 0) {
+        return response;
+    }
+    char *content = malloc(strlen(response.content) * sizeof(char) + 200 * sizeof(char));
+    strcpy(content, response.content);
+    bzero(response.content, strlen(response.content));
+    char *header = "<html><body><pre><h1>POSTDATA </h1></pre>";
+    memcpy(response.content, header, strlen(header));
+    memcpy(response.content + strlen(header), content, strlen(content));
+    return response;
+}
+
+void clear(struct HttpRequest req) {
+    int len = strlen(req.resource);
+    memset(req.connection_state, 0, strlen(req.connection_state));
+    memset(req.host, 0, strlen(req.host));
+    memset(req.http_version, 0, strlen(req.http_version));
+    memset(req.resource, 0, strlen(req.resource));
+    memset(req.request_method, 0, strlen(req.request_method));
+}
 /*
  * echo - read and echo text lines until client closes connection
  */
@@ -151,22 +239,65 @@ void echo(int connfd)
     response_str = malloc(20000 * sizeof(char));
     struct HttpRequest request;
     struct HttpResponse response;
+    int keepAlive = 0; int is_first = 1;
     n = read(connfd, buf, MAXLINE);
     if (n > 0) {
-        request = getHttpAttributes(buf);
-        response = getResponseContents(request);
-        strcat(response_str, request.http_version);
-        strcat(response_str, " ");
-        strcat(response_str, response.status_code);
-        strcat(response_str, " ");
-        strcat(response_str, "Document Follows");
-        strcat(response_str, "\r\n");
-        strcat(response_str, "Content-Type:text/html\r\n");
-        strcat(response_str, "Content-Length:");
-        strcat(response_str, response.content_length);
-        strcat(response_str, "\r\n\r\n");
-        strcat(response_str, response.content);
-        write(connfd, response_str, strlen(response_str));
+        while(keepAlive == 1 || is_first == 1) {
+            printf("Request made on socket: %d \n", connfd);
+            clear(request);
+            memset(response_str, 0, 20000 * sizeof(char));
+            request = getHttpAttributes(buf);
+            if (strcmp(request.connection_state, "Keep-alive") == 0 || strcmp(request.connection_state, "keep-alive") == 0) {
+                keepAlive = 1;
+            } else {
+                keepAlive = 0;
+            }
+            if (strcmp(request.request_method, "GET") == 0 || strcmp(request.request_method, "Get") == 0) {
+                response = getResponseContents(request);
+            } else if (strcmp(request.request_method, "POST") == 0 || strcmp(request.request_method, "Post") == 0) {
+                response = postResponseContents(request);
+            } else if (strcmp(request.request_method, "HEAD") == 0 || strcmp(request.request_method, "Head") == 0) {
+                response = getResponseContents(request);
+            } else {
+
+            }
+            strcat(response_str, request.http_version);
+            strcat(response_str, " ");
+            strcat(response_str, response.status_code);
+            strcat(response_str, " ");
+            if (strcmp(response.status_code, "500") == 0) {
+                strcat(response_str, "Internal Server Error");
+            } else {
+                strcat(response_str, "Document Follows");
+                strcat(response_str, "\r\n");
+                strcat(response_str, "Content-Type:");
+                strcat(response_str, response.content_type);
+                strcat(response_str, "\r\n");
+                strcat(response_str, "Content-Length:");
+                strcat(response_str, response.content_length);
+                strcat(response_str, "\r\n");
+                if (keepAlive == 1) {
+                    strcat(response_str, "Connection: Keep-alive\r\n");
+                } else {
+                    strcat(response_str, "Connection: Close\r\n");
+                }
+                if (strcmp(request.request_method, "POST") == 0 || strcmp(request.request_method, "GET") == 0) {
+                    strcat(response_str, "\r\n\r\n");
+                    strcat(response_str, response.content);
+                }
+            }
+            write(connfd, response_str, strlen(response_str));
+            is_first = 0;
+            if (keepAlive == 1) {
+                printf("waiting to read");
+                bzero(buf, strlen(buf));
+                n = read(connfd, buf, MAXLINE);
+                printf("reading request");
+                if (n < 0) {
+                    printf("empty message");
+                }
+            }
+        }
     }
     
 }
